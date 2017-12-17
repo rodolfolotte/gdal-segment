@@ -16,11 +16,14 @@
 #/* CMakeLists.txt */
 #/* GDAL Segment */
 
-ADD_EXECUTABLE(gdal-segment
+ADD_EXECUTABLE(superpixel
                io/raster.cpp
                io/vector.cpp
-               gdal-segment.cpp)
+               io/writeCSV.cpp
+               io/writeARFF.cpp
+               io/ioUtils.cpp
+               superpixel.cpp)
 
-TARGET_LINK_LIBRARIES(gdal-segment ${GDAL_LIBRARY} ${OpenCV_LIBS})
+TARGET_LINK_LIBRARIES(superpixel ${GDAL_LIBRARY} ${OpenCV_LIBS})
 
 

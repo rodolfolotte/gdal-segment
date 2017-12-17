@@ -48,33 +48,27 @@
 #include "cpl_string.h"
 #include "cpl_csv.h"
 
-#include "gdal-segment.hpp"
+#include "superpixel.hpp"
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/ximgproc.hpp>
-#include <opencv2/hdf/hdf5.hpp>
 
 using namespace std;
 using namespace cv;
 using namespace cv::ximgproc;
-
-
 
 int main(int argc, char ** argv)
 {
   const char *algo = "";
   vector< string > InFilenames;
   const char *OutFilename = NULL;
-  const char *OutStatH5name = NULL;
   const char *OutFormat = "ESRI Shapefile";
-
+  
   // general defaults
   int niter = 0;
   bool blur = false;
-  bool labcol = false;
-  bool enforce = true;
   int regionsize = 0;
 
   // some counters
@@ -98,7 +92,6 @@ int main(int argc, char ** argv)
   /*
    * load arguments
    */
-
   for( int i = 1; i < argc; i++ )
   {
     if( argv[i][0] == '-' )
@@ -123,10 +116,6 @@ int main(int argc, char ** argv)
         OutFilename = argv[i+1];
         i++; continue;
       }
-      if( EQUAL( argv[i],"-h5stat" ) ) {
-        OutStatH5name = argv[i+1];
-        i++; continue;
-      }
       if( EQUAL( argv[i],"-of" ) ) {
         OutFormat = argv[i+1];
         i++; continue;
@@ -134,19 +123,6 @@ int main(int argc, char ** argv)
       if( EQUAL( argv[i],"-blur" ) ) {
         blur = true;
         continue;
-      }
-      if( EQUAL( argv[i],"-lab" ) ) {
-        labcol = true;
-        continue;
-      }
-      if( EQUAL( argv[i],"-merge" ) ) {
-        if( EQUAL( argv[i+1],"true" ) )
-          enforce = true;
-        else if( EQUAL( argv[i+1],"false" ) )
-          enforce = false;
-        else
-          help = true;
-        i++; continue;
       }
       printf( "Invalid %s option.\n\n", argv[i] );
       help = true;
@@ -162,8 +138,7 @@ int main(int argc, char ** argv)
   {
     // check parameters
     if ( EQUAL( algo, "SLIC"  )
-      || EQUAL( algo, "SLICO" )
-      || EQUAL( algo, "MSLIC" ) )
+      || EQUAL( algo, "SLICO" ) )
     {
         if (!niter) niter = 10;
         if (!regionsize) regionsize = 10;
@@ -199,26 +174,25 @@ int main(int argc, char ** argv)
   }
 
   if ( help || askhelp ) {
-    printf( "\nUsage: gdal-segment [-help] src_raster1 src_raster2 .. src_rasterN -out dst_vector\n"
+    printf( "\nUsage: gdal-segment [-help] src_rgb src_entropy -out dst_vector\n"
             "    [-of <output_format> 'ESRI Shapefile' is default]\n"
-            "    [-h5stat <output hdf5 statfile>]\n"
-            "    [-b R B (B-th band from R-th raster)] [-algo <LSC, SLICO, SLIC, SEEDS, MSLIC>]\n"
-            "    [-blur (apply 3x3 gaussian blur)] [-lab (convert rgb ro lab colorspace)]\n"
-            "    [-merge <true|false (default true)>]\n"
+            "    [-b R B (N-th band from R-th raster)]\n" 
+            "    [-algo <LSC, SLICO, SLIC, SEEDS>]\n"
             "    [-niter <1..500>] [-region <pixels>]\n"
+            "    [-blur (apply 3x3 gaussian blur)]\n\n"
             "Default niter: 10 iterations\n\n" );
 
     GDALDestroyDriverManager();
     exit( 1 );
   }
 
-#if GDALVER >= 2
-  GDALDriverManager *poR = GetGDALDriverManager();
-  GDALDriver *poDriver = poR->GetDriverByName( OutFormat );
-#else
-  OGRSFDriverRegistrar *poR = OGRSFDriverRegistrar::GetRegistrar();
-  OGRSFDriver *poDriver = poR->GetDriverByName( OutFormat );
-#endif
+  #if GDALVER >= 2
+    GDALDriverManager *poR = GetGDALDriverManager();
+    GDALDriver *poDriver = poR->GetDriverByName( OutFormat );
+  #else 
+    OGRSFDriverRegistrar *poR = OGRSFDriverRegistrar::GetRegistrar();
+    OGRSFDriver *poDriver = poR->GetDriverByName( OutFormat );
+  #endif
 
   // check drivers
   if( poDriver == NULL )
@@ -227,17 +201,17 @@ int main(int argc, char ** argv)
     printf( "The following drivers are available:\n" );
     for( int i = 0; i < poR->GetDriverCount(); i++ )
     {
-#if GDALVER >= 2
-      const char *prop = poR->GetDriver(i)->GetMetadataItem( GDAL_DCAP_RASTER );
-      if ( prop == NULL )
-      {
-        const char *name = poR->GetDriver(i)->GetDescription();
-        const char *desc = poR->GetDriver(i)->GetMetadataItem( GDAL_DMD_LONGNAME );
-        printf( "  -> '%s' (%s)\n", name, desc );
-      }
-#else
-      printf( "  -> '%s'\n", poR->GetDriver(i)->GetName());
-#endif
+      #if GDALVER >= 2
+        const char *prop = poR->GetDriver(i)->GetMetadataItem( GDAL_DCAP_RASTER );
+        if ( prop == NULL )
+        {
+          const char *name = poR->GetDriver(i)->GetDescription();
+          const char *desc = poR->GetDriver(i)->GetMetadataItem( GDAL_DMD_LONGNAME );
+          printf( "  -> '%s' (%s)\n", name, desc );
+        }
+        #else
+          printf( "  -> '%s'\n", poR->GetDriver(i)->GetName());
+        #endif
     }
     exit( 1 );
   }
@@ -246,25 +220,25 @@ int main(int argc, char ** argv)
   printf( "Process use parameter: region=%i niter=%i\n", regionsize, niter );
 
   /*
-   * load raster image
+   * load rgb, entropy, HSV, and Lab images
    */
-
   startTime = cv::getTickCount();
   std::vector< cv::Mat > raster;
-  LoadRaster( InFilenames, raster );
+  std::vector< cv::Mat > entropy;
+  std::vector< cv::Mat > hsv;
+  std::vector< cv::Mat > lab;
+
+  printf("rgb: %s\n", InFilenames[0].c_str());
+  printf("local entropy: %s\n", InFilenames[1].c_str());
+  printf("hsv: %s\n", InFilenames[2].c_str());
+  printf("lab: %s\n", InFilenames[3].c_str());
+
+  LoadRaster( InFilenames[0], raster );
+  LoadRaster( InFilenames[1], entropy );
+  LoadRaster( InFilenames[2], hsv );
+  LoadRaster( InFilenames[3], lab );
   endTime = cv::getTickCount();
   printf( "Time: %.6f sec\n\n", ( endTime - startTime ) / frequency );
-
-  std::vector<Mat> original;
-
-  if ( labcol )
-  {
-    Mat temp;
-    // safe copy original
-    merge(raster, temp);
-    split(temp, original);
-    temp.release();
-  }
 
   if ( blur )
   {
@@ -280,49 +254,49 @@ int main(int argc, char ** argv)
     printf( "Time: %.6f sec\n\n", ( endTime - startTime ) / frequency );
   }
 
-
-  Mat rgb;
-  if ( labcol )
-  {
-    Mat lab;
-    raster.resize(3);
-    printf( "Convert to LAB colorspace.\n" );
-    merge( raster, rgb );
-    cvtColor( rgb, lab, CV_RGB2Lab );
-    split(lab, raster);
-  }
-
   /*
    * init segments
    */
-
   printf( "Init Superpixels\n" );
   Ptr<SuperpixelSLIC> slic;
   Ptr<SuperpixelSEEDS> seed;
   Ptr<SuperpixelLSC> lsc;
+  cv::Mat klabels;
+  size_t m_labels = 0;
+
+  size_t m_bands = raster.size();
+  size_t entropy_bands = entropy.size();
+  size_t hsv_bands = hsv.size();
+  size_t lab_bands = lab.size();
 
   startTime = cv::getTickCount();
-  if ( EQUAL ( algo, "SLIC" ) )
+  if ( EQUAL( algo, "SLIC" ) || EQUAL( algo, "SLICO" ) )
+  {
     slic = createSuperpixelSLIC( raster, SLIC, regionsize, 10.0f );
+    m_labels = slic->getNumberOfSuperpixels();
+  }
   else if ( EQUAL( algo, "SLICO" ) )
+  {
     slic = createSuperpixelSLIC( raster, SLICO, regionsize, 10.0f );
-  else if ( EQUAL( algo, "MSLIC" ) )
-    slic = createSuperpixelSLIC( raster, MSLIC, regionsize, 10.0f );
-  else if ( EQUAL( algo, "LSC" ) )
+    m_labels = slic->getNumberOfSuperpixels();
+  }
+  else if ( EQUAL( algo, "LSC" ) ) 
+  {
     lsc = createSuperpixelLSC( raster, regionsize, 0.075f );
+    m_labels = lsc->getNumberOfSuperpixels();    
+  }
   else if ( EQUAL( algo, "SEEDS" ) )
   {
     // only few datatype is supported
-    if ( ( raster[0].depth() != CV_8U )
-       &&( raster.size() != 3 ) )
+    if ( ( raster[0].depth() != CV_8U ) &&( raster.size() != 3 ) )
     {
       printf( "\nERROR: Input datatype is not supported by SEED. Use RGB or Gray with Byte types.\n" );
       exit( 0 );
     }
 
-    int clusters = int(((float)raster[0].cols / (float)regionsize)
-                     * ((float)raster[0].rows / (float)regionsize));
+    int clusters = int(((float)raster[0].cols / (float)regionsize) * ((float)raster[0].rows / (float)regionsize));
     seed = createSuperpixelSEEDS( raster[0].cols, raster[0].rows, raster.size(), clusters, 1, 2, 5, true );
+    m_labels = seed->getNumberOfSuperpixels();
   }
   else
   {
@@ -331,165 +305,158 @@ int main(int argc, char ** argv)
   }
   endTime = cv::getTickCount();
   printf( "Time: %.6f sec\n\n", ( endTime - startTime ) / frequency );
-
-  size_t m_labels = 0;
-  if ( EQUAL( algo, "SLIC" )
-    || EQUAL( algo, "SLICO" )
-    || EQUAL( algo, "MSLIC" ) )
-    m_labels = slic->getNumberOfSuperpixels();
-  else if ( EQUAL( algo, "SEEDS" ) )
-    m_labels = seed->getNumberOfSuperpixels();
-  else if ( EQUAL( algo, "LSC" ) )
-    m_labels = lsc->getNumberOfSuperpixels();
-
-  startTime = cv::getTickCount();
   printf( "Grow Superpixels: #%i iterations\n", niter );
   printf( "           inits: %lu superpixels\n", m_labels );
-
+   
   /*
    * start compute segments
    */
-
   startSecond = cv::getTickCount();
-  if ( EQUAL( algo, "SLIC" )
-    || EQUAL( algo, "SLICO" )
-    || EQUAL( algo, "MSLIC" ) )
-    slic->iterate( niter );
-  else if ( EQUAL( algo, "LSC" ) )
-    lsc->iterate( niter );
-  else if ( EQUAL( algo, "SEEDS" ) )
+  if ( EQUAL( algo, "SLIC" ) || EQUAL( algo, "SLICO" ) )
+  {
+    slic->iterate( niter );    
+    slic->enforceLabelConnectivity();
+    m_labels = slic->getNumberOfSuperpixels();
+    slic->getLabels( klabels );
+    slic.release();
+  }
+  else if ( EQUAL( algo, "LSC" ) ) 
+  {
+    lsc->iterate( niter );    
+    lsc->enforceLabelConnectivity();
+    m_labels = lsc->getNumberOfSuperpixels();
+    lsc->getLabels( klabels );
+    lsc.release();
+  } 
+  else if ( EQUAL( algo, "SEEDS" ) ) 
   {
     cv::Mat whole;
     cv::merge(raster,whole);
-    seed->iterate( whole, niter );
-  }
-  endSecond = cv::getTickCount();
-
-
-  if( EQUAL( algo, "SLIC" )
-   || EQUAL( algo, "SLICO" )
-   || EQUAL( algo, "MSLIC" ) )
-    m_labels = slic->getNumberOfSuperpixels();
-  else if ( EQUAL( algo, "SEEDS" ) )
+    seed->iterate( whole, niter );    
     m_labels = seed->getNumberOfSuperpixels();
-  else if ( EQUAL( algo, "LSC" ) )
-    m_labels = lsc->getNumberOfSuperpixels();
-
-  printf( "           count: %lu superpixels (growed in %.6f sec)\n",
-          m_labels, ( endSecond - startSecond ) / frequency );
-
-  // get smooth labels
-  startSecond = cv::getTickCount();
-  if ( EQUAL( algo, "SLIC" )
-    || EQUAL( algo, "SLICO" )
-    || EQUAL( algo, "MSLIC" ) )
-  {
-    if ( enforce == true )
-      slic->enforceLabelConnectivity();
-  }
-  else if ( EQUAL( algo, "LSC" ) )
-  {
-    if ( enforce == true)
-      lsc->enforceLabelConnectivity();
-  }
-  endSecond = cv::getTickCount();
-
-  if ( EQUAL( algo, "SLIC" )
-    || EQUAL( algo, "MSLIC" )
-    || EQUAL( algo, "SLICO" ) )
-    m_labels = slic->getNumberOfSuperpixels();
-  else if ( EQUAL( algo, "SEEDS" ) )
-    m_labels = seed->getNumberOfSuperpixels();
-  else if ( EQUAL( algo, "LSC" ) )
-    m_labels = lsc->getNumberOfSuperpixels();
-
-  if ( ! EQUAL( algo, "SEEDS" ) )
-  {
-    printf( "           final: %lu superpixels (merged in %.6f sec)\n",
-            m_labels, ( endSecond - startSecond ) / frequency );
-    endTime = cv::getTickCount();
-    printf( "Time: %.6f sec\n\n", ( endTime - startTime ) / frequency );
-  }
-
-
-  // storage
-  cv::Mat klabels;
-  if( EQUAL( algo, "SLIC" )
-   || EQUAL( algo, "MSLIC" )
-   || EQUAL( algo, "SLICO" ) )
-    slic->getLabels( klabels );
-  else if( EQUAL( algo, "SEEDS" ) )
     seed->getLabels( klabels );
-  else if( EQUAL( algo, "LSC" ) )
-    lsc->getLabels( klabels );
-
-  // release mem
-  slic.release();
-  seed.release();
-  lsc.release();
+    seed.release();
+  }
+  endSecond = cv::getTickCount();
+  printf( "          update: %lu superpixels (merged in %.6f sec)\n", m_labels, ( endSecond - startSecond ) / frequency );
 
   /*
    * get segments contour
    */
-
-  std::vector< std::vector< LINE > > linelists( m_labels );
-
   startTime = cv::getTickCount();
+  std::vector< std::vector< LINE > > linelists( m_labels );
   LabelContours( klabels, linelists );
   endTime = cv::getTickCount();
   printf( "Time: %.6f sec\n\n", ( endTime - startTime ) / frequency );
 
+  /*
+   * declaration
+   */  
+   Mat labelpixels(m_labels, 1, CV_32S);
+   Mat avgRGB(m_bands, m_labels, CV_64F);
+   Mat stdRGB(m_bands, m_labels, CV_64F);
+   Mat varRGB(m_bands, m_labels, CV_64F);
+   Mat avgEntropy(entropy_bands, m_labels, CV_64F);
+   Mat stdEntropy(entropy_bands, m_labels, CV_64F);
+   Mat varEntropy(entropy_bands, m_labels, CV_64F);
+   Mat avgHSV(hsv_bands, m_labels, CV_64F);
+   Mat stdHSV(hsv_bands, m_labels, CV_64F);
+   Mat varHSV(hsv_bands, m_labels, CV_64F);
+   Mat avgLab(lab_bands, m_labels, CV_64F);
+   Mat stdLab(lab_bands, m_labels, CV_64F);
+   Mat varLab(lab_bands, m_labels, CV_64F);
+ 
+  std::vector<double> area( m_labels ); 
+  std::vector<double> perimeter( m_labels );   
+  std::vector<double> width( m_labels );
+  std::vector<double> height( m_labels ); 
+  std::vector<double> elongation( m_labels );
+  std::vector<double> circularity( m_labels );
+  std::vector<double> rectangularity( m_labels );
+  std::vector<double> compactness( m_labels );
 
   /*
-   * statistics
-   */
-
+  * staticsts
+  */
   startTime = cv::getTickCount();
-
-  if ( labcol )
-  {
-    raster = original;
-  }
-
-  // superpixels property
-  size_t m_bands = raster.size();
-
-  Mat labelpixels(m_labels, 1, CV_32S);
-  Mat avgCH(m_bands, m_labels, CV_64F);
-  Mat stdCH(m_bands, m_labels, CV_64F);
-
-  ComputeStats( klabels, raster, labelpixels, avgCH, stdCH );
+  ComputeStats( klabels, raster, labelpixels, avgRGB, stdRGB, varRGB);  
+  ComputeStats( klabels, entropy, labelpixels, avgEntropy, stdEntropy, varEntropy);
+  ComputeStats( klabels, hsv, labelpixels, avgHSV, stdHSV, varHSV);
+  ComputeStats( klabels, lab, labelpixels, avgLab, stdLab, varLab);
   endTime = cv::getTickCount();
-  printf( "Time: %.6f sec\n\n", ( endTime - startTime ) / frequency );
+  printf( "Computed statistics: %.6f sec\n\n", ( endTime - startTime ) / frequency );
 
+  /* 
+  * geometries
+  */
+  startTime = cv::getTickCount();
+  ComputeGeometries(m_labels, 
+                  labelpixels, 
+                  area, perimeter, width, height, 
+                  elongation, circularity, rectangularity, compactness, 
+                  linelists );
+  endTime = cv::getTickCount();
+  printf( "Computed geometries: %.6f sec\n\n", ( endTime - startTime ) / frequency );
 
- /*
+  /*
   * dump vector
   */
-
   startTime = cv::getTickCount();
-  SavePolygons( InFilenames, OutFilename, OutFormat, klabels,
-                raster, labelpixels, avgCH, stdCH, linelists );
+  SavePolygons( InFilenames, 
+                OutFilename, 
+                OutFormat,                 
+                m_bands, 
+                entropy_bands,
+                hsv_bands, 
+                lab_bands,
+                labelpixels, 
+                avgRGB, stdRGB, varRGB, 
+                avgEntropy, stdEntropy, varEntropy,
+                avgHSV, stdHSV, varHSV,
+                avgLab, stdLab, varLab,
+                area, perimeter, width, height, 
+                elongation, circularity, rectangularity, compactness, 
+                linelists );
   endTime = cv::getTickCount();
-  printf( "Time: %.6f sec\n\n", ( endTime - startTime ) / frequency );
+  printf( "Saved polygon: %.6f sec\n\n", ( endTime - startTime ) / frequency );
 
-
- /*
-  * dump stats
+  /*
+  * write csv
   */
-
-  if ( OutStatH5name )
-  {
-    cv::Ptr<cv::hdf::HDF5> h5io = cv::hdf::open( OutStatH5name );
-    h5io->dswrite( avgCH, "average" );
-    h5io->dswrite( stdCH, "stddevs" );
-    h5io->dswrite( labelpixels, "pixarea" );
-    h5io->close();
-  }
-
- /*
-  * END
+  startTime = cv::getTickCount();
+  writeCSV( OutFilename,      
+            m_labels,          
+            m_bands, 
+            entropy_bands,                
+            hsv_bands, 
+            lab_bands, 
+            avgRGB, stdRGB, varRGB, 
+            avgEntropy, stdEntropy, varEntropy,
+            avgHSV, stdHSV, varHSV, 
+            avgLab, stdLab, varLab,
+            area, perimeter, width, height, 
+            elongation, circularity, rectangularity, compactness );
+  endTime = cv::getTickCount();
+  printf( "Wrote CSF file: %.6f sec\n\n", ( endTime - startTime ) / frequency );
+  
+  /*
+  * write arff
   */
+  startTime = cv::getTickCount();
+  writeARFF( OutFilename,      
+            m_labels,          
+            m_bands, 
+            entropy_bands,                
+            hsv_bands, 
+            lab_bands, 
+            avgRGB, stdRGB, varRGB, 
+            avgEntropy, stdEntropy, varEntropy,
+            avgHSV, stdHSV, varHSV, 
+            avgLab, stdLab, varLab,
+            area, perimeter, width, height, 
+            elongation, circularity, rectangularity, compactness );
+  endTime = cv::getTickCount();
+  printf( "Wrote ARFF file: %.6f sec\n\n", ( endTime - startTime ) / frequency );
 
   printf( "Finish.\n" );
 

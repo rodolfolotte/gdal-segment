@@ -25,14 +25,13 @@
 
 #include <opencv2/opencv.hpp>
 
-#include "gdal-segment.hpp"
+#include "superpixel.hpp"
 
 using namespace cv;
 
 
 
-void LoadRaster( const std::vector< std::string > InFilenames,
-                 std::vector< cv::Mat >& raster )
+void LoadRaster( std::string InFilename, std::vector< cv::Mat >& raster )
 {
   int rasters = 0;
   int channel = 0;
@@ -40,17 +39,14 @@ void LoadRaster( const std::vector< std::string > InFilenames,
   std::string prev_dType = "";
   int prev_XSize = 0, prev_YSize = 0;
 
-  for ( size_t i = 0; i < InFilenames.size(); i++ )
-  {
-
     GDALDataset* piDataset;
 
     // open the dataset
-    piDataset = (GDALDataset*) GDALOpen(InFilenames[i].c_str(), GA_ReadOnly);
+    piDataset = (GDALDataset*) GDALOpen(InFilename.c_str(), GA_ReadOnly);
 
     if( piDataset == NULL )
     {
-      printf("\nERROR: Couldn't open dataset %s\n", InFilenames[i].c_str());
+      printf("\nERROR: Couldn't open dataset %s\n",InFilename.c_str());
       exit( 1 );
     }
 
@@ -61,8 +57,7 @@ void LoadRaster( const std::vector< std::string > InFilenames,
     }
 
     rasters++;
-    printf ("\nLoad Raster #%i (#%lu): %s\n", rasters,
-              InFilenames.size(), InFilenames[i].c_str());
+    printf ("\nLoading %s \n", InFilename.c_str());
 
     // count raster bands
     int nBands = piDataset->GetRasterCount();
@@ -222,8 +217,8 @@ void LoadRaster( const std::vector< std::string > InFilenames,
                              break;
 
                            case GDT_Int32:
-                             Channel.at<u_int32_t>( iYShifts, iX + iXAllBlocks )
-                                       = pabyData.at<u_int32_t>( iYOffset + iX );
+                             Channel.at<int>( iYShifts, iX + iXAllBlocks )
+                                       = pabyData.at<int>( iYOffset + iX );
                              break;
 
                            case GDT_Float32:
@@ -251,14 +246,16 @@ void LoadRaster( const std::vector< std::string > InFilenames,
     }
     GDALTermProgress( 1.0f, NULL, NULL );
     GDALClose( (GDALDatasetH) piDataset );
-  }
+  
 }
 
 void ComputeStats( const cv::Mat klabels,
                    const std::vector< cv::Mat > raster,
-                   cv::Mat& labelpixels, cv::Mat& avgCH, cv::Mat& stdCH )
+                   cv::Mat& labelpixels, 
+                   cv::Mat& avgCH, 
+                   cv::Mat& stdCH, 
+                   cv::Mat& varCH )
 {
-
   avgCH = Scalar::all(0);
   stdCH = Scalar::all(0);
   labelpixels = Scalar::all(0);
@@ -394,5 +391,45 @@ void ComputeStats( const cv::Mat klabels,
       GDALTermProgress( (float)(k+1) / (float)(labelpixels.rows), NULL, NULL );
   }
   GDALTermProgress( 1.0f, NULL, NULL );
+
+  printf ("       Computing CLASS variance\n");
+  printf ("       ");
+  for (int k = 0; k < labelpixels.rows; k++)
+  {
+      #pragma omp parallel for schedule(dynamic)
+      for (int b = 0; b < m_bands; b++)
+      {
+            switch ( raster[b].depth() )
+            {
+              case CV_8U:
+                varCH.at<double>(b,k) += pow( (double) stdCH.at<double>(b,k), 2 );
+                break;
+              case CV_8S:
+              varCH.at<double>(b,k) += pow( (double) stdCH.at<double>(b,k), 2 );
+                break;
+              case CV_16U:
+              varCH.at<double>(b,k) += pow( (double) stdCH.at<double>(b,k), 2 );
+                break;
+              case CV_16S:
+              varCH.at<double>(b,k) += pow( (double) stdCH.at<double>(b,k), 2 );
+                break;
+              case CV_32S:
+              varCH.at<double>(b,k) += pow( (double) stdCH.at<double>(b,k), 2 );
+                break;
+              case CV_32F:
+              varCH.at<double>(b,k) += pow( (double) stdCH.at<double>(b,k), 2 );
+                break;
+              case CV_64F:
+              varCH.at<double>(b,k) += pow( (double) stdCH.at<double>(b,k), 2 );
+                break;
+              default:
+                CV_Error( Error::StsInternal, "\nERROR: Invalid raster depth" );
+                break;
+            }          
+      }
+      GDALTermProgress( (float)(k+1) / (float)(labelpixels.rows), NULL, NULL );
+  }
+  GDALTermProgress( 1.0f, NULL, NULL );
+
 
 }
